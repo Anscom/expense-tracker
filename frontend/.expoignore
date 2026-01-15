@@ -1,0 +1,14 @@
+node_modules/
+.expo/
+.expo-shared/
+dist/
+build/
+*.log
+.DS_Store
+.git/
+../backend/
+backend/
+*.md
+ARCHITECTURE.md
+SETUP.md
+README.md
