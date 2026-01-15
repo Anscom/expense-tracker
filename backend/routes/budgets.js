@@ -39,7 +39,7 @@ router.post('/', async (req, res) => {
     
     const budget = await Budget.findOneAndUpdate(
       { category, userId: 'default-user' },
-      { category, amount: parseFloat(amount), period: period || 'weekly', userId: 'default-user' },
+      { category, amount: parseFloat(amount), period: period || 'monthly', userId: 'default-user' },
       { upsert: true, new: true }
     );
     
@@ -154,11 +154,10 @@ router.get('/summary/overall', async (req, res) => {
   }
 });
 
-// Get monthly budget summary
+// Get monthly budget summary with category breakdown
 router.get('/summary/monthly', async (req, res) => {
   try {
     const budgets = await Budget.find({ userId: 'default-user' });
-    const totalBudget = budgets.reduce((sum, b) => sum + b.amount, 0);
     
     // Get current month expenses
     const now = new Date();
@@ -170,21 +169,60 @@ router.get('/summary/monthly', async (req, res) => {
       date: { $gte: startOfMonth, $lt: endOfMonth }
     });
     
-    const totalSpent = expenses.reduce((sum, exp) => sum + exp.amount, 0);
     const daysElapsed = Math.floor((now - startOfMonth) / (1000 * 60 * 60 * 24)) + 1;
     const daysTotal = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
     const remainingDays = daysTotal - daysElapsed;
-    const dailyAllowance = remainingDays > 0 ? (totalBudget - totalSpent) / remainingDays : 0;
+    
+    // Calculate per-category spending
+    const categorySpending = {};
+    expenses.forEach(exp => {
+      if (!categorySpending[exp.category]) {
+        categorySpending[exp.category] = 0;
+      }
+      categorySpending[exp.category] += exp.amount;
+    });
+    
+    // Calculate category-based budgets with progress
+    const categoryBudgets = budgets.map(budget => {
+      const spent = categorySpending[budget.category] || 0;
+      const remaining = Math.max(0, budget.amount - spent);
+      const percentageUsed = budget.amount > 0 ? (spent / budget.amount) * 100 : 0;
+      const dailyAllowance = remainingDays > 0 ? remaining / remainingDays : 0;
+      
+      return {
+        category: budget.category,
+        budget: budget.amount,
+        spent: spent,
+        remaining: remaining,
+        percentageUsed: Math.round(percentageUsed * 10) / 10,
+        safeToSpendToday: Math.max(0, dailyAllowance),
+        isOnTrack: spent <= budget.amount
+      };
+    });
+    
+    // Calculate totals
+    const totalBudget = budgets.reduce((sum, b) => {
+      if (b.period === 'monthly') {
+        return sum + b.amount;
+      } else {
+        return sum + (b.amount * 4.33);
+      }
+    }, 0);
+    
+    const totalSpent = expenses.reduce((sum, exp) => sum + exp.amount, 0);
+    const totalRemaining = Math.max(0, totalBudget - totalSpent);
+    const totalDailyAllowance = remainingDays > 0 ? totalRemaining / remainingDays : 0;
     
     res.json({
-      totalBudget,
+      totalBudget: Math.round(totalBudget * 100) / 100,
       totalSpent,
-      remaining: Math.max(0, totalBudget - totalSpent),
+      remaining: totalRemaining,
       daysElapsed,
       daysTotal,
       remainingDays,
-      safeToSpendToday: Math.max(0, dailyAllowance),
-      percentageUsed: totalBudget > 0 ? (totalSpent / totalBudget) * 100 : 0
+      safeToSpendToday: Math.max(0, totalDailyAllowance),
+      percentageUsed: totalBudget > 0 ? (totalSpent / totalBudget) * 100 : 0,
+      categories: categoryBudgets
     });
   } catch (error) {
     res.status(500).json({ error: error.message });

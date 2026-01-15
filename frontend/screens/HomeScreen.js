@@ -29,7 +29,10 @@ export default function HomeScreen({ navigation }) {
   const [refreshing, setRefreshing] = useState(false);
   const [showBudgetModal, setShowBudgetModal] = useState(false);
   const [editingBudget, setEditingBudget] = useState(null);
-  const [budgetForm, setBudgetForm] = useState({ category: '', amount: '', period: 'monthly' });
+  const [selectedCategories, setSelectedCategories] = useState({}); // { categoryName: { amount: '' } }
+  const [initialBudgetCategories, setInitialBudgetCategories] = useState(new Set()); // Track which categories had budgets when modal opened
+  const [showNewCategoryInput, setShowNewCategoryInput] = useState(false);
+  const [newCategoryName, setNewCategoryName] = useState('');
 
   const loadData = async () => {
     try {
@@ -79,6 +82,7 @@ export default function HomeScreen({ navigation }) {
     );
   }
 
+  const categoryBudgets = monthlySummary?.categories || [];
   const safeToSpendToday = monthlySummary?.safeToSpendToday || 0;
   const monthlySpent = monthlySummary?.totalSpent || 0;
   const monthlyBudget = monthlySummary?.totalBudget || 0;
@@ -96,38 +100,132 @@ export default function HomeScreen({ navigation }) {
   };
 
   const handleSaveBudget = async () => {
-    if (!budgetForm.category || !budgetForm.amount) {
-      Alert.alert('Error', 'Please fill in all fields');
-      return;
+    // If creating a new category, save it first
+    if (showNewCategoryInput && newCategoryName.trim()) {
+      try {
+        await categoryService.create({
+          name: newCategoryName.trim(),
+          keywords: [],
+          icon: '💰',
+          color: '#6366f1',
+        });
+        // Add the new category to selected categories
+        setSelectedCategories({
+          ...selectedCategories,
+          [newCategoryName.trim()]: { amount: '' }
+        });
+        // Update categories list
+        const updatedCategories = await categoryService.getAll();
+        setCategories(updatedCategories);
+        setShowNewCategoryInput(false);
+        setNewCategoryName('');
+        return; // Let user set amount for new category
+      } catch (error) {
+        console.log('Category creation note:', error.message);
+      }
     }
 
-    const amountNum = parseFloat(budgetForm.amount);
-    if (isNaN(amountNum) || amountNum <= 0) {
-      Alert.alert('Error', 'Please enter a valid amount');
+    // Get all selected categories with valid amounts
+    const budgetsToSave = Object.entries(selectedCategories)
+      .filter(([category, data]) => data.amount && parseFloat(data.amount) > 0)
+      .map(([category, data]) => ({
+        category: category.trim(),
+        amount: parseFloat(data.amount),
+        period: 'monthly', // Always monthly
+      }));
+
+    // Find categories that had budgets initially but are no longer selected
+    const categoriesToDelete = Array.from(initialBudgetCategories).filter(
+      category => !selectedCategories[category] || !selectedCategories[category].amount || parseFloat(selectedCategories[category].amount) <= 0
+    );
+
+    // If no budgets to save and no budgets to delete, show error
+    if (budgetsToSave.length === 0 && categoriesToDelete.length === 0) {
+      Alert.alert('Error', 'Please select at least one category and enter an amount');
       return;
     }
 
     try {
-      if (editingBudget) {
-        await budgetService.update(editingBudget._id, {
-          amount: amountNum,
-          period: budgetForm.period,
-        });
-      } else {
-        await budgetService.create({
-          category: budgetForm.category.trim(),
-          amount: amountNum,
-          period: budgetForm.period,
-        });
+      // Save/update all selected budgets
+      if (budgetsToSave.length > 0) {
+        await Promise.all(
+          budgetsToSave.map(budget => budgetService.create(budget))
+        );
       }
+
+      // Delete budgets for unchecked categories
+      if (categoriesToDelete.length > 0) {
+        // Find the budget IDs for categories to delete
+        const budgetsToDelete = budgets.filter(b => 
+          categoriesToDelete.includes(b.category)
+        );
+        
+        await Promise.all(
+          budgetsToDelete.map(budget => budgetService.delete(budget._id))
+        );
+      }
+      
       setShowBudgetModal(false);
-      setEditingBudget(null);
-      setBudgetForm({ category: '', amount: '', period: 'monthly' });
+      setSelectedCategories({});
+      setInitialBudgetCategories(new Set());
+      setShowNewCategoryInput(false);
+      setNewCategoryName('');
       loadData();
     } catch (error) {
       console.error('Budget save error:', error);
-      Alert.alert('Error', error.message || 'Failed to save budget');
+      Alert.alert('Error', error.message || 'Failed to save budgets');
     }
+  };
+
+  const handleCategoryToggle = (categoryName) => {
+    if (selectedCategories[categoryName]) {
+      // Uncheck - remove from selection
+      const newSelection = { ...selectedCategories };
+      delete newSelection[categoryName];
+      setSelectedCategories(newSelection);
+    } else {
+      // Check - add to selection with default values
+      setSelectedCategories({
+        ...selectedCategories,
+        [categoryName]: { amount: '' }
+      });
+    }
+  };
+
+  const handleCategoryAmountChange = (categoryName, amount) => {
+    setSelectedCategories({
+      ...selectedCategories,
+      [categoryName]: {
+        ...selectedCategories[categoryName],
+        amount: amount
+      }
+    });
+  };
+
+  const handleDeleteCategory = async (categoryId, categoryName) => {
+    Alert.alert(
+      'Delete Category',
+      `Are you sure you want to delete "${categoryName}"?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await categoryService.delete(categoryId);
+              // Remove from selected categories if selected
+              const newSelection = { ...selectedCategories };
+              delete newSelection[categoryName];
+              setSelectedCategories(newSelection);
+              loadData();
+            } catch (error) {
+              Alert.alert('Error', error.message || 'Failed to delete category');
+            }
+          },
+        },
+      ]
+    );
   };
 
   const handleDeleteBudget = (id) => {
@@ -153,28 +251,51 @@ export default function HomeScreen({ navigation }) {
   };
 
   const openBudgetModal = (budget = null) => {
+    // Track which categories had budgets when modal opens
+    const initialCategories = new Set(budgets.map(b => b.category));
+    setInitialBudgetCategories(initialCategories);
+
     if (budget) {
+      // For editing, load ALL existing budgets into selectedCategories
+      // so user can see and edit all budgets, not just the one clicked
       setEditingBudget(budget);
-      setBudgetForm({
-        category: budget.category,
-        amount: budget.amount.toString(),
-        period: budget.period,
+      const allBudgetsMap = {};
+      budgets.forEach(b => {
+        allBudgetsMap[b.category] = {
+          amount: b.amount.toString()
+        };
       });
+      setSelectedCategories(allBudgetsMap);
+      setShowNewCategoryInput(false);
     } else {
+      // For creating new budgets, start with existing budgets pre-selected
       setEditingBudget(null);
-      setBudgetForm({ category: '', amount: '', period: 'monthly' });
+      const existingBudgetsMap = {};
+      budgets.forEach(b => {
+        existingBudgetsMap[b.category] = {
+          amount: b.amount.toString()
+        };
+      });
+      setSelectedCategories(existingBudgetsMap);
+      setShowNewCategoryInput(false);
+      setNewCategoryName('');
     }
     setShowBudgetModal(true);
+  };
+
+  const handleCreateNewCategory = () => {
+    setShowNewCategoryInput(true);
   };
 
   return (
     <ScrollView
       style={styles.container}
+      contentContainerStyle={styles.scrollContent}
       refreshControl={
         <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
       }
     >
-      {/* Hero: Safe to Spend Today */}
+      {/* Hero: Safe to Spend Today with Budget Progress */}
       <View style={styles.heroSection}>
         <LinearGradient
           colors={isOnTrack ? ['#10b981', '#059669'] : ['#ef4444', '#dc2626']}
@@ -184,11 +305,52 @@ export default function HomeScreen({ navigation }) {
           <Text style={styles.heroAmount}>
             ${safeToSpendToday.toFixed(2)}
           </Text>
-          <Text style={styles.heroSubtext}>
-            {isOnTrack
-              ? `$${monthlyRemaining.toFixed(2)} left this month`
-              : 'Over budget this month'}
-          </Text>
+          {/* Category Budget Progress inside Hero Section */}
+          {categoryBudgets.length > 0 && (
+            <View style={styles.budgetsProgressCardInHero}>
+              {categoryBudgets.map((catBudget, index) => {
+                const category = categories.find(cat => cat.name === catBudget.category);
+                const categoryIcon = category?.icon || '💰';
+                const progressPercentage = Math.min(100, catBudget.percentageUsed);
+                const isOverBudget = catBudget.spent > catBudget.budget;
+                const isLast = index === categoryBudgets.length - 1;
+                
+                return (
+                  <View key={index} style={[styles.progressItemInHero, isLast && styles.progressItemLast]}>
+                    <View style={styles.progressHeader}>
+                      <View style={styles.progressCategoryInfo}>
+                        <Text style={styles.progressCategoryIcon}>{categoryIcon}</Text>
+                        <View style={styles.progressCategoryText}>
+                          <Text style={styles.progressCategoryNameInHero}>{catBudget.category}</Text>
+                          <Text style={styles.progressCategoryAmountInHero}>
+                            ${catBudget.spent.toFixed(2)} / ${catBudget.budget.toFixed(2)}
+                          </Text>
+                        </View>
+                      </View>
+                      <Text style={[
+                        styles.progressSafeToSpendInHero,
+                        isOverBudget && styles.progressSafeToSpendOverInHero
+                      ]}>
+                        ${catBudget.safeToSpendToday.toFixed(2)}/day
+                      </Text>
+                    </View>
+                    <View style={styles.progressBarContainerInHero}>
+                      <View 
+                        style={[
+                          styles.progressBarInHero,
+                          { width: `${progressPercentage}%` },
+                          isOverBudget ? styles.progressBarOverInHero : styles.progressBarNormalInHero
+                        ]} 
+                      />
+                    </View>
+                    <Text style={styles.progressPercentageInHero}>
+                      {progressPercentage.toFixed(1)}% used
+                    </Text>
+                  </View>
+                );
+              })}
+            </View>
+          )}
         </LinearGradient>
       </View>
 
@@ -318,64 +480,42 @@ export default function HomeScreen({ navigation }) {
           </View>
         ) : (
           <View style={styles.budgetsCard}>
-            {budgets.map((budget) => (
-              <View key={budget._id} style={styles.budgetItem}>
-                <View style={styles.budgetInfo}>
-                  <Text style={styles.budgetCategory}>{budget.category}</Text>
-                  <Text style={styles.budgetAmount}>
-                    ${budget.amount.toFixed(2)} / {budget.period}
-                  </Text>
+            {budgets.map((budget) => {
+              const category = categories.find(cat => cat.name === budget.category);
+              const categoryIcon = category?.icon || '💰';
+              
+              return (
+                <View key={budget._id} style={styles.budgetItem}>
+                  <View style={styles.budgetInfo}>
+                    <View style={styles.budgetCategoryRow}>
+                      <Text style={styles.budgetCategoryIcon}>{categoryIcon}</Text>
+                      <Text style={styles.budgetCategory}>{budget.category}</Text>
+                    </View>
+                    <Text style={styles.budgetAmount}>
+                      ${budget.amount.toFixed(2)} / month
+                    </Text>
+                  </View>
+                  <View style={styles.budgetActions}>
+                    <TouchableOpacity
+                      onPress={() => openBudgetModal(budget)}
+                      style={styles.actionButton}
+                    >
+                      <Ionicons name="pencil" size={18} color="#6366f1" />
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      onPress={() => handleDeleteBudget(budget._id)}
+                      style={styles.actionButton}
+                    >
+                      <Ionicons name="trash" size={18} color="#ef4444" />
+                    </TouchableOpacity>
+                  </View>
                 </View>
-                <View style={styles.budgetActions}>
-                  <TouchableOpacity
-                    onPress={() => openBudgetModal(budget)}
-                    style={styles.actionButton}
-                  >
-                    <Ionicons name="pencil" size={18} color="#6366f1" />
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    onPress={() => handleDeleteBudget(budget._id)}
-                    style={styles.actionButton}
-                  >
-                    <Ionicons name="trash" size={18} color="#ef4444" />
-                  </TouchableOpacity>
-                </View>
-              </View>
-            ))}
+              );
+            })}
           </View>
         )}
       </View>
 
-      {/* Categories Section */}
-      <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Categories</Text>
-        {categories.length === 0 ? (
-          <View style={styles.emptyState}>
-            <Text style={styles.emptyText}>No categories</Text>
-          </View>
-        ) : (
-          <View style={styles.categoriesCard}>
-            <View style={styles.categoriesGrid}>
-              {categories.map((cat) => (
-                <View key={cat._id || cat.name} style={styles.categoryChip}>
-                  <Text style={styles.categoryChipText}>{cat.name}</Text>
-                </View>
-              ))}
-            </View>
-          </View>
-        )}
-      </View>
-
-      {/* Quick Add Button */}
-      <View style={styles.section}>
-        <TouchableOpacity
-          style={styles.addButton}
-          onPress={() => navigation.navigate('Add')}
-        >
-          <Ionicons name="add-circle" size={24} color="#fff" />
-          <Text style={styles.addButtonText}>Add Expense</Text>
-        </TouchableOpacity>
-      </View>
 
       {/* Budget Modal */}
       <Modal
@@ -392,126 +532,122 @@ export default function HomeScreen({ navigation }) {
             >
               <View style={styles.modalHeader}>
                 <Text style={styles.modalTitle}>
-                  {editingBudget ? 'Edit Budget' : 'New Budget'}
+                  {editingBudget ? 'Edit Budget' : 'Set Budgets'}
                 </Text>
                 <TouchableOpacity onPress={() => setShowBudgetModal(false)}>
                   <Ionicons name="close" size={24} color="#1f2937" />
                 </TouchableOpacity>
               </View>
 
-            <View style={styles.formGroup}>
-              <Text style={styles.formLabel}>Category</Text>
-              {editingBudget ? (
-                <Text style={styles.formValue}>{budgetForm.category}</Text>
-              ) : categories.length > 0 ? (
+              {/* Category Selection with Checkboxes */}
+              <View style={styles.formGroup}>
+                <Text style={styles.formLabel}>Select Categories</Text>
                 <ScrollView 
                   style={styles.categorySelector}
                   nestedScrollEnabled={true}
                   showsVerticalScrollIndicator={true}
                 >
-                  {categories.map((cat) => (
-                    <TouchableOpacity
-                      key={cat._id || cat.name}
-                      style={[
-                        styles.categoryOption,
-                        budgetForm.category === cat.name &&
-                          styles.categoryOptionActive,
-                      ]}
-                      onPress={() =>
-                        setBudgetForm({ ...budgetForm, category: cat.name })
-                      }
-                    >
-                      <Text
-                        style={[
-                          styles.categoryOptionText,
-                          budgetForm.category === cat.name &&
-                            styles.categoryOptionTextActive,
-                        ]}
-                      >
-                        {cat.name}
-                      </Text>
-                      {budgetForm.category === cat.name && (
-                        <Ionicons name="checkmark" size={20} color="#6366f1" />
-                      )}
-                    </TouchableOpacity>
-                  ))}
+                  {categories.map((cat) => {
+                    const isSelected = !!selectedCategories[cat.name];
+                    const categoryData = selectedCategories[cat.name] || { amount: '' };
+                    
+                    return (
+                      <View key={cat._id || cat.name} style={styles.categoryCheckboxItem}>
+                        <View style={styles.checkboxRowContainer}>
+                          <TouchableOpacity
+                            style={styles.checkboxRow}
+                            onPress={() => handleCategoryToggle(cat.name)}
+                          >
+                            <View style={[
+                              styles.checkbox,
+                              isSelected && styles.checkboxChecked
+                            ]}>
+                              {isSelected && (
+                                <Ionicons name="checkmark" size={16} color="#fff" />
+                              )}
+                            </View>
+                            <Text style={styles.categoryIcon}>{cat.icon || '💰'}</Text>
+                            <Text style={styles.categoryCheckboxLabel}>{cat.name}</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            style={styles.deleteCategoryButton}
+                            onPress={() => handleDeleteCategory(cat._id || cat.name, cat.name)}
+                          >
+                            <Ionicons name="trash-outline" size={18} color="#ef4444" />
+                          </TouchableOpacity>
+                        </View>
+                        
+                        {isSelected && (
+                          <View style={styles.categoryBudgetInput}>
+                            <Text style={styles.budgetLabel}>Monthly Budget Limit</Text>
+                            <View style={styles.amountInputContainer}>
+                              <Text style={styles.currencySymbol}>$</Text>
+                              <TextInput
+                                style={styles.amountInputField}
+                                value={categoryData.amount}
+                                onChangeText={(text) => handleCategoryAmountChange(cat.name, text)}
+                                placeholder="0.00"
+                                keyboardType="decimal-pad"
+                              />
+                            </View>
+                          </View>
+                        )}
+                      </View>
+                    );
+                  })}
                 </ScrollView>
-              ) : (
-                <TextInput
-                  style={styles.formInput}
-                  value={budgetForm.category}
-                  onChangeText={(text) =>
-                    setBudgetForm({ ...budgetForm, category: text })
-                  }
-                  placeholder="Enter category name"
-                  autoCapitalize="words"
-                />
-              )}
-            </View>
-
-            <View style={styles.formGroup}>
-              <Text style={styles.formLabel}>Amount</Text>
-              <TextInput
-                style={styles.formInput}
-                value={budgetForm.amount}
-                onChangeText={(text) =>
-                  setBudgetForm({ ...budgetForm, amount: text })
-                }
-                placeholder="0.00"
-                keyboardType="decimal-pad"
-              />
-            </View>
-
-            <View style={styles.formGroup}>
-              <Text style={styles.formLabel}>Period</Text>
-              <View style={styles.periodSelector}>
-                <TouchableOpacity
-                  style={[
-                    styles.periodButton,
-                    budgetForm.period === 'weekly' && styles.periodButtonActive,
-                  ]}
-                  onPress={() =>
-                    setBudgetForm({ ...budgetForm, period: 'weekly' })
-                  }
-                >
-                  <Text
-                    style={[
-                      styles.periodButtonText,
-                      budgetForm.period === 'weekly' &&
-                        styles.periodButtonTextActive,
-                    ]}
+                
+                {/* Create New Category */}
+                {showNewCategoryInput ? (
+                  <View style={styles.newCategoryInputContainer}>
+                    <TextInput
+                      style={styles.formInput}
+                      value={newCategoryName}
+                      onChangeText={setNewCategoryName}
+                      placeholder="Enter new category name"
+                      autoCapitalize="words"
+                      autoFocus
+                    />
+                    <View style={styles.newCategoryActions}>
+                      <TouchableOpacity
+                        style={styles.cancelNewCategoryButton}
+                        onPress={() => {
+                          setShowNewCategoryInput(false);
+                          setNewCategoryName('');
+                        }}
+                      >
+                        <Text style={styles.cancelNewCategoryText}>Cancel</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={styles.addCategoryButton}
+                        onPress={handleSaveBudget}
+                      >
+                        <Text style={styles.addCategoryButtonText}>Add</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                ) : (
+                  <TouchableOpacity
+                    style={styles.createCategoryButton}
+                    onPress={handleCreateNewCategory}
                   >
-                    Weekly
-                  </Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[
-                    styles.periodButton,
-                    budgetForm.period === 'monthly' &&
-                      styles.periodButtonActive,
-                  ]}
-                  onPress={() =>
-                    setBudgetForm({ ...budgetForm, period: 'monthly' })
-                  }
-                >
-                  <Text
-                    style={[
-                      styles.periodButtonText,
-                      budgetForm.period === 'monthly' &&
-                        styles.periodButtonTextActive,
-                    ]}
-                  >
-                    Monthly
-                  </Text>
-                </TouchableOpacity>
+                    <Ionicons name="add-circle-outline" size={20} color="#6366f1" />
+                    <Text style={styles.createCategoryText}>Create New Category</Text>
+                  </TouchableOpacity>
+                )}
               </View>
-            </View>
 
             <TouchableOpacity
-              style={styles.saveButton}
+              style={[
+                styles.saveButton,
+                Object.keys(selectedCategories).length === 0 && styles.saveButtonDisabled
+              ]}
               onPress={handleSaveBudget}
+              disabled={Object.keys(selectedCategories).length === 0}
             >
-              <Text style={styles.saveButtonText}>Save</Text>
+              <Text style={styles.saveButtonText}>
+                Save {Object.keys(selectedCategories).length > 0 ? `${Object.keys(selectedCategories).length} ` : ''}Budget{Object.keys(selectedCategories).length !== 1 ? 's' : ''}
+              </Text>
             </TouchableOpacity>
             </ScrollView>
           </View>
@@ -526,6 +662,9 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#f9fafb',
   },
+  scrollContent: {
+    paddingTop: 40,
+  },
   centerContainer: {
     flex: 1,
     justifyContent: 'center',
@@ -533,13 +672,14 @@ const styles = StyleSheet.create({
   },
   heroSection: {
     padding: 20,
-    paddingTop: 16,
+    paddingTop: 20,
     paddingBottom: 24,
   },
   heroCard: {
     borderRadius: 20,
     padding: 32,
     alignItems: 'center',
+    marginBottom: 16,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.15,
@@ -617,6 +757,130 @@ const styles = StyleSheet.create({
   },
   summaryValueNegative: {
     color: '#ef4444',
+  },
+  budgetsProgressCard: {
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    padding: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 3,
+    elevation: 2,
+  },
+  progressItem: {
+    marginBottom: 20,
+  },
+  progressItemLast: {
+    marginBottom: 0,
+  },
+  progressHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  progressCategoryInfo: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+  progressCategoryIcon: {
+    fontSize: 24,
+    marginRight: 12,
+  },
+  progressCategoryText: {
+    flex: 1,
+  },
+  progressCategoryName: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#111827',
+    marginBottom: 2,
+  },
+  progressCategoryAmount: {
+    fontSize: 13,
+    color: '#6b7280',
+  },
+  progressSafeToSpend: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#10b981',
+  },
+  progressSafeToSpendOver: {
+    color: '#ef4444',
+  },
+  progressBarContainer: {
+    height: 8,
+    backgroundColor: '#f3f4f6',
+    borderRadius: 4,
+    overflow: 'hidden',
+    marginBottom: 6,
+  },
+  progressBar: {
+    height: '100%',
+    borderRadius: 4,
+  },
+  progressBarNormal: {
+    backgroundColor: '#10b981',
+  },
+  progressBarOver: {
+    backgroundColor: '#ef4444',
+  },
+  progressPercentage: {
+    fontSize: 12,
+    color: '#6b7280',
+  },
+  budgetsProgressCardInHero: {
+    width: '100%',
+    marginBottom: 20,
+  },
+  progressItemInHero: {
+    marginBottom: 16,
+  },
+  progressCategoryNameInHero: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#fff',
+    marginBottom: 2,
+  },
+  progressCategoryAmountInHero: {
+    fontSize: 12,
+    color: '#fff',
+    opacity: 0.9,
+  },
+  progressSafeToSpendInHero: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#fff',
+    opacity: 0.95,
+  },
+  progressSafeToSpendOverInHero: {
+    color: '#fff',
+    opacity: 0.9,
+  },
+  progressBarContainerInHero: {
+    height: 6,
+    backgroundColor: 'rgba(255, 255, 255, 0.3)',
+    borderRadius: 3,
+    overflow: 'hidden',
+    marginBottom: 4,
+  },
+  progressBarInHero: {
+    height: '100%',
+    borderRadius: 3,
+  },
+  progressBarNormalInHero: {
+    backgroundColor: '#fff',
+  },
+  progressBarOverInHero: {
+    backgroundColor: '#fff',
+    opacity: 0.8,
+  },
+  progressPercentageInHero: {
+    fontSize: 11,
+    color: '#fff',
+    opacity: 0.85,
   },
   categoryCard: {
     backgroundColor: '#fff',
@@ -721,25 +985,6 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     marginLeft: 6,
   },
-  addButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#6366f1',
-    paddingVertical: 16,
-    borderRadius: 12,
-    shadowColor: '#6366f1',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 4,
-  },
-  addButtonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
-    marginLeft: 8,
-  },
   addIconButton: {
     padding: 4,
   },
@@ -778,11 +1023,19 @@ const styles = StyleSheet.create({
   budgetInfo: {
     flex: 1,
   },
+  budgetCategoryRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  budgetCategoryIcon: {
+    fontSize: 20,
+    marginRight: 8,
+  },
   budgetCategory: {
     fontSize: 15,
     fontWeight: '600',
     color: '#111827',
-    marginBottom: 4,
   },
   budgetAmount: {
     fontSize: 13,
@@ -794,31 +1047,6 @@ const styles = StyleSheet.create({
   },
   actionButton: {
     padding: 8,
-  },
-  categoriesCard: {
-    backgroundColor: '#fff',
-    borderRadius: 12,
-    padding: 16,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.05,
-    shadowRadius: 3,
-    elevation: 2,
-  },
-  categoriesGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-  },
-  categoryChip: {
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    backgroundColor: '#f3f4f6',
-    borderRadius: 20,
-  },
-  categoryChipText: {
-    fontSize: 14,
-    color: '#1f2937',
   },
   modalOverlay: {
     flex: 1,
@@ -869,27 +1097,91 @@ const styles = StyleSheet.create({
     borderColor: '#e5e7eb',
   },
   categorySelector: {
-    maxHeight: 200,
+    maxHeight: 300,
     marginTop: 8,
   },
-  categoryOption: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
+  categoryCheckboxItem: {
+    marginBottom: 16,
     padding: 12,
     backgroundColor: '#f9fafb',
     borderRadius: 8,
-    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
   },
-  categoryOptionActive: {
+  checkboxRowContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  checkboxRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+  categoryIcon: {
+    fontSize: 24,
+    marginRight: 12,
+  },
+  checkbox: {
+    width: 24,
+    height: 24,
+    borderRadius: 6,
+    borderWidth: 2,
+    borderColor: '#9ca3af',
+    marginRight: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#fff',
+  },
+  checkboxChecked: {
     backgroundColor: '#6366f1',
+    borderColor: '#6366f1',
   },
-  categoryOptionText: {
+  categoryCheckboxLabel: {
     fontSize: 16,
+    fontWeight: '500',
     color: '#1f2937',
+    flex: 1,
   },
-  categoryOptionTextActive: {
+  categoryBudgetInput: {
+    marginTop: 12,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#e5e7eb',
+  },
+  budgetLabel: {
+    fontSize: 14,
+    color: '#6b7280',
+    marginBottom: 8,
+    fontWeight: '500',
+  },
+  deleteCategoryButton: {
+    padding: 8,
+  },
+  newCategoryInputContainer: {
+    marginTop: 12,
+    padding: 12,
+    backgroundColor: '#f9fafb',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+  },
+  newCategoryActions: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    marginTop: 12,
+    gap: 8,
+  },
+  addCategoryButton: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    backgroundColor: '#6366f1',
+    borderRadius: 6,
+  },
+  addCategoryButtonText: {
     color: '#fff',
+    fontSize: 14,
+    fontWeight: '600',
   },
   periodSelector: {
     flexDirection: 'row',
@@ -922,9 +1214,73 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginTop: 8,
   },
+  saveButtonDisabled: {
+    backgroundColor: '#d1d5db',
+    opacity: 0.6,
+  },
   saveButtonText: {
     color: '#fff',
     fontSize: 18,
     fontWeight: 'bold',
+  },
+  createCategoryButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 12,
+    marginTop: 12,
+    backgroundColor: '#f3f4f6',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    borderStyle: 'dashed',
+  },
+  createCategoryText: {
+    fontSize: 15,
+    color: '#6366f1',
+    fontWeight: '500',
+    marginLeft: 8,
+  },
+  cancelNewCategoryButton: {
+    alignSelf: 'flex-end',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    marginTop: 8,
+  },
+  cancelNewCategoryText: {
+    fontSize: 14,
+    color: '#6b7280',
+    fontWeight: '500',
+  },
+  amountInputContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f9fafb',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    paddingHorizontal: 12,
+  },
+  currencySymbol: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: '#6366f1',
+    marginRight: 8,
+  },
+  amountInputField: {
+    flex: 1,
+    fontSize: 18,
+    color: '#1f2937',
+    paddingVertical: 12,
+  },
+  amountInputDisabled: {
+    backgroundColor: '#f3f4f6',
+    color: '#9ca3af',
+  },
+  helperText: {
+    fontSize: 12,
+    color: '#6b7280',
+    marginTop: 6,
+    fontStyle: 'italic',
   },
 });

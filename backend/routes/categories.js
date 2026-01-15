@@ -1,13 +1,26 @@
 import express from 'express';
 import Category from '../models/Category.js';
 import { getCategoryRules } from '../utils/categorization.js';
+import { getPresetCategoriesSimple } from '../enums/categories.js';
 
 const router = express.Router();
 
 // Get all categories
 router.get('/', async (req, res) => {
   try {
-    const categories = await Category.find().sort({ name: 1 });
+    // Ensure preset categories exist
+    const presetCategories = getPresetCategoriesSimple();
+    
+    // Upsert preset categories
+    for (const preset of presetCategories) {
+      await Category.findOneAndUpdate(
+        { name: preset.name },
+        preset,
+        { upsert: true, new: true }
+      );
+    }
+    
+    const categories = await Category.find().sort({ isPreset: -1, name: 1 });
     res.json(categories);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -80,10 +93,13 @@ router.put('/:id', async (req, res) => {
 // Delete category
 router.delete('/:id', async (req, res) => {
   try {
-    const category = await Category.findByIdAndDelete(req.params.id);
+    const category = await Category.findById(req.params.id);
     if (!category) {
       return res.status(404).json({ error: 'Category not found' });
     }
+    
+    // Allow deletion of all categories, including presets
+    await Category.findByIdAndDelete(req.params.id);
     res.json({ message: 'Category deleted successfully' });
   } catch (error) {
     res.status(500).json({ error: error.message });

@@ -18,6 +18,10 @@ const categorySchema = new mongoose.Schema({
   color: {
     type: String,
     default: '#6366f1'
+  },
+  isPreset: {
+    type: Boolean,
+    default: false
   }
 }, {
   timestamps: true

@@ -8,4 +8,6 @@ export const expenseService = {
   delete: (id) => api.delete(`/expenses/${id}`),
   getTotal: (params = {}) => api.get('/expenses/stats/total', { params }),
   getTodayByCategory: () => api.get('/expenses/today/by-category'),
+  getByMonth: () => api.get('/expenses/by-month'),
+  getByMonthYear: (year, month) => api.get(`/expenses/month/${year}/${month}`),
 };

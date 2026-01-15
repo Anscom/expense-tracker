@@ -30,7 +30,123 @@ router.get('/', async (req, res) => {
   }
 });
 
-// Get single expense
+// Get total spent for a period
+router.get('/stats/total', async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+    const query = { userId: 'default-user' };
+    
+    if (startDate || endDate) {
+      query.date = {};
+      if (startDate) query.date.$gte = new Date(startDate);
+      if (endDate) query.date.$lte = new Date(endDate);
+    }
+    
+    const result = await Expense.aggregate([
+      { $match: query },
+      { $group: { _id: null, total: { $sum: '$amount' } } }
+    ]);
+    
+    const total = result.length > 0 ? result[0].total : 0;
+    res.json({ total });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get today's expenses grouped by category
+router.get('/today/by-category', async (req, res) => {
+  try {
+    const now = new Date();
+    const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const endOfDay = new Date(startOfDay);
+    endOfDay.setDate(endOfDay.getDate() + 1);
+    
+    const expenses = await Expense.find({
+      userId: 'default-user',
+      date: { $gte: startOfDay, $lt: endOfDay }
+    });
+    
+    const categorySpending = {};
+    expenses.forEach(expense => {
+      categorySpending[expense.category] = (categorySpending[expense.category] || 0) + expense.amount;
+    });
+    
+    const categoryList = Object.entries(categorySpending).map(([category, amount]) => ({
+      category,
+      amount
+    })).sort((a, b) => b.amount - a.amount);
+    
+    res.json({
+      total: expenses.reduce((sum, exp) => sum + exp.amount, 0),
+      byCategory: categoryList
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get expenses grouped by month
+router.get('/by-month', async (req, res) => {
+  try {
+    const expenses = await Expense.find({ userId: 'default-user' })
+      .sort({ date: -1 });
+    
+    // Group expenses by month
+    const monthlyData = {};
+    expenses.forEach(expense => {
+      const date = new Date(expense.date);
+      const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+      const monthName = date.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+      
+      if (!monthlyData[monthKey]) {
+        monthlyData[monthKey] = {
+          monthKey,
+          monthName,
+          year: date.getFullYear(),
+          month: date.getMonth() + 1,
+          expenses: [],
+          total: 0,
+          expenseCount: 0
+        };
+      }
+      
+      monthlyData[monthKey].expenses.push(expense);
+      monthlyData[monthKey].total += expense.amount;
+      monthlyData[monthKey].expenseCount += 1;
+    });
+    
+    // Convert to array and sort by date (newest first)
+    const monthlyList = Object.values(monthlyData).sort((a, b) => {
+      if (a.year !== b.year) return b.year - a.year;
+      return b.month - a.month;
+    });
+    
+    res.json(monthlyList);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get expenses for a specific month
+router.get('/month/:year/:month', async (req, res) => {
+  try {
+    const { year, month } = req.params;
+    const startOfMonth = new Date(parseInt(year), parseInt(month) - 1, 1);
+    const endOfMonth = new Date(parseInt(year), parseInt(month), 1);
+    
+    const expenses = await Expense.find({
+      userId: 'default-user',
+      date: { $gte: startOfMonth, $lt: endOfMonth }
+    }).sort({ date: -1 });
+    
+    res.json(expenses);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get single expense (must be last to avoid conflicting with specific routes)
 router.get('/:id', async (req, res) => {
   try {
     const expense = await Expense.findById(req.params.id);
@@ -161,6 +277,66 @@ router.get('/today/by-category', async (req, res) => {
       total: expenses.reduce((sum, exp) => sum + exp.amount, 0),
       byCategory: categoryList
     });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get expenses grouped by month
+router.get('/by-month', async (req, res) => {
+  try {
+    const expenses = await Expense.find({ userId: 'default-user' })
+      .sort({ date: -1 });
+    
+    // Group expenses by month
+    const monthlyData = {};
+    expenses.forEach(expense => {
+      const date = new Date(expense.date);
+      const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+      const monthName = date.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+      
+      if (!monthlyData[monthKey]) {
+        monthlyData[monthKey] = {
+          monthKey,
+          monthName,
+          year: date.getFullYear(),
+          month: date.getMonth() + 1,
+          expenses: [],
+          total: 0,
+          expenseCount: 0
+        };
+      }
+      
+      monthlyData[monthKey].expenses.push(expense);
+      monthlyData[monthKey].total += expense.amount;
+      monthlyData[monthKey].expenseCount += 1;
+    });
+    
+    // Convert to array and sort by date (newest first)
+    const monthlyList = Object.values(monthlyData).sort((a, b) => {
+      if (a.year !== b.year) return b.year - a.year;
+      return b.month - a.month;
+    });
+    
+    res.json(monthlyList);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get expenses for a specific month
+router.get('/month/:year/:month', async (req, res) => {
+  try {
+    const { year, month } = req.params;
+    const startOfMonth = new Date(parseInt(year), parseInt(month) - 1, 1);
+    const endOfMonth = new Date(parseInt(year), parseInt(month), 1);
+    
+    const expenses = await Expense.find({
+      userId: 'default-user',
+      date: { $gte: startOfMonth, $lt: endOfMonth }
+    }).sort({ date: -1 });
+    
+    res.json(expenses);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
