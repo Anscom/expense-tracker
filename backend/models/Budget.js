@@ -10,6 +10,16 @@ const budgetSchema = new mongoose.Schema({
     required: true,
     min: 0
   },
+  weekdayAmount: {
+    type: Number,
+    min: 0,
+    default: null
+  },
+  weekendAmount: {
+    type: Number,
+    min: 0,
+    default: null
+  },
   period: {
     type: String,
     enum: ['weekly', 'monthly'],

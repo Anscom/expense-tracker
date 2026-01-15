@@ -31,15 +31,30 @@ router.get('/:id', async (req, res) => {
 // Create or update budget
 router.post('/', async (req, res) => {
   try {
-    const { category, amount, period } = req.body;
+    const { category, amount, weekdayAmount, weekendAmount, period } = req.body;
     
     if (!category || amount === undefined) {
       return res.status(400).json({ error: 'Category and amount are required' });
     }
     
+    const updateData = {
+      category,
+      amount: parseFloat(amount),
+      period: period || 'monthly',
+      userId: 'default-user'
+    };
+    
+    // Add weekday/weekend amounts if provided
+    if (weekdayAmount !== undefined && weekdayAmount !== null) {
+      updateData.weekdayAmount = parseFloat(weekdayAmount);
+    }
+    if (weekendAmount !== undefined && weekendAmount !== null) {
+      updateData.weekendAmount = parseFloat(weekendAmount);
+    }
+    
     const budget = await Budget.findOneAndUpdate(
       { category, userId: 'default-user' },
-      { category, amount: parseFloat(amount), period: period || 'monthly', userId: 'default-user' },
+      updateData,
       { upsert: true, new: true }
     );
     
@@ -173,34 +188,101 @@ router.get('/summary/monthly', async (req, res) => {
     const daysTotal = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
     const remainingDays = daysTotal - daysElapsed;
     
-    // Calculate per-category spending
-    const categorySpending = {};
+    // Calculate per-category spending (separate weekday and weekend)
+    const categorySpending = { weekday: {}, weekend: {}, total: {} };
     expenses.forEach(exp => {
-      if (!categorySpending[exp.category]) {
-        categorySpending[exp.category] = 0;
+      const expenseDate = new Date(exp.date);
+      const dayOfWeek = expenseDate.getDay(); // 0 = Sunday, 6 = Saturday
+      const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+      const dayType = isWeekend ? 'weekend' : 'weekday';
+      
+      if (!categorySpending.total[exp.category]) {
+        categorySpending.total[exp.category] = 0;
+        categorySpending.weekday[exp.category] = 0;
+        categorySpending.weekend[exp.category] = 0;
       }
-      categorySpending[exp.category] += exp.amount;
+      categorySpending.total[exp.category] += exp.amount;
+      categorySpending[dayType][exp.category] += exp.amount;
     });
+    
+    // Calculate weekday and weekend days in the month
+    const weekdayCount = [];
+    const weekendCount = [];
+    for (let day = 1; day <= daysTotal; day++) {
+      const date = new Date(now.getFullYear(), now.getMonth(), day);
+      const dayOfWeek = date.getDay();
+      if (dayOfWeek === 0 || dayOfWeek === 6) {
+        weekendCount.push(day);
+      } else {
+        weekdayCount.push(day);
+      }
+    }
+    const weekdayDaysTotal = weekdayCount.length;
+    const weekendDaysTotal = weekendCount.length;
+    const weekdayDaysElapsed = weekdayCount.filter(day => day <= daysElapsed).length;
+    const weekendDaysElapsed = weekendCount.filter(day => day <= daysElapsed).length;
+    const weekdayDaysRemaining = weekdayDaysTotal - weekdayDaysElapsed;
+    const weekendDaysRemaining = weekendDaysTotal - weekendDaysElapsed;
+    
+    // Check if today is weekday or weekend
+    const todayDayOfWeek = now.getDay();
+    const isTodayWeekend = todayDayOfWeek === 0 || todayDayOfWeek === 6;
     
     // Calculate category-based budgets with progress
     const categoryBudgets = budgets.map(budget => {
-      const spent = categorySpending[budget.category] || 0;
-      const remaining = Math.max(0, budget.amount - spent);
-      const percentageUsed = budget.amount > 0 ? (spent / budget.amount) * 100 : 0;
-      const dailyAllowance = remainingDays > 0 ? remaining / remainingDays : 0;
+      const totalSpent = categorySpending.total[budget.category] || 0;
+      const weekdaySpent = categorySpending.weekday[budget.category] || 0;
+      const weekendSpent = categorySpending.weekend[budget.category] || 0;
+      
+      // Determine which budget to use
+      const hasSeparateBudgets = budget.weekdayAmount !== null && budget.weekendAmount !== null;
+      const weekdayBudget = hasSeparateBudgets ? budget.weekdayAmount : budget.amount;
+      const weekendBudget = hasSeparateBudgets ? budget.weekendAmount : budget.amount;
+      const totalBudget = hasSeparateBudgets 
+        ? (weekdayBudget * weekdayDaysTotal) + (weekendBudget * weekendDaysTotal)
+        : budget.amount;
+      
+      // Calculate remaining and daily allowance
+      // For separate budgets, calculate based on daily amounts
+      // For regular budgets, use the total amount
+      let safeToSpendToday = 0;
+      let remaining = 0;
+      
+      if (hasSeparateBudgets) {
+        if (isTodayWeekend) {
+          const weekendRemaining = Math.max(0, (weekendBudget * weekendDaysTotal) - weekendSpent);
+          safeToSpendToday = weekendDaysRemaining > 0 ? weekendRemaining / weekendDaysRemaining : 0;
+        } else {
+          const weekdayRemaining = Math.max(0, (weekdayBudget * weekdayDaysTotal) - weekdaySpent);
+          safeToSpendToday = weekdayDaysRemaining > 0 ? weekdayRemaining / weekdayDaysRemaining : 0;
+        }
+        remaining = Math.max(0, totalBudget - totalSpent);
+      } else {
+        // Regular budget - divide remaining by all remaining days
+        remaining = Math.max(0, totalBudget - totalSpent);
+        safeToSpendToday = remainingDays > 0 ? remaining / remainingDays : 0;
+      }
+      
+      const percentageUsed = totalBudget > 0 ? (totalSpent / totalBudget) * 100 : 0;
       
       return {
         category: budget.category,
-        budget: budget.amount,
-        spent: spent,
+        budget: totalBudget,
+        weekdayBudget: weekdayBudget,
+        weekendBudget: weekendBudget,
+        hasSeparateBudgets: hasSeparateBudgets,
+        spent: totalSpent,
+        weekdaySpent: weekdaySpent,
+        weekendSpent: weekendSpent,
         remaining: remaining,
         percentageUsed: Math.round(percentageUsed * 10) / 10,
-        safeToSpendToday: Math.max(0, dailyAllowance),
-        isOnTrack: spent <= budget.amount
+        safeToSpendToday: Math.max(0, safeToSpendToday),
+        isOnTrack: totalSpent <= totalBudget,
+        isTodayWeekend: isTodayWeekend
       };
     });
     
-    // Calculate totals
+    // Calculate totals (accounting for weekday/weekend budgets)
     const totalBudget = budgets.reduce((sum, b) => {
       if (b.period === 'monthly') {
         return sum + b.amount;
@@ -211,7 +293,28 @@ router.get('/summary/monthly', async (req, res) => {
     
     const totalSpent = expenses.reduce((sum, exp) => sum + exp.amount, 0);
     const totalRemaining = Math.max(0, totalBudget - totalSpent);
-    const totalDailyAllowance = remainingDays > 0 ? totalRemaining / remainingDays : 0;
+    
+    // Calculate total daily allowance based on whether today is weekday or weekend
+    let totalDailyAllowance = 0;
+    if (isTodayWeekend) {
+      const weekendTotalRemaining = categoryBudgets.reduce((sum, cat) => {
+        if (cat.hasSeparateBudgets) {
+          const weekendRemaining = Math.max(0, (cat.weekendBudget * weekendDaysTotal) - cat.weekendSpent);
+          return sum + (weekendRemaining / Math.max(1, weekendDaysRemaining));
+        }
+        return sum + (cat.remaining / Math.max(1, remainingDays));
+      }, 0);
+      totalDailyAllowance = weekendTotalRemaining;
+    } else {
+      const weekdayTotalRemaining = categoryBudgets.reduce((sum, cat) => {
+        if (cat.hasSeparateBudgets) {
+          const weekdayRemaining = Math.max(0, (cat.weekdayBudget * weekdayDaysTotal) - cat.weekdaySpent);
+          return sum + (weekdayRemaining / Math.max(1, weekdayDaysRemaining));
+        }
+        return sum + (cat.remaining / Math.max(1, remainingDays));
+      }, 0);
+      totalDailyAllowance = weekdayTotalRemaining;
+    }
     
     res.json({
       totalBudget: Math.round(totalBudget * 100) / 100,

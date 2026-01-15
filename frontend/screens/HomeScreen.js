@@ -29,7 +29,7 @@ export default function HomeScreen({ navigation }) {
   const [refreshing, setRefreshing] = useState(false);
   const [showBudgetModal, setShowBudgetModal] = useState(false);
   const [editingBudget, setEditingBudget] = useState(null);
-  const [selectedCategories, setSelectedCategories] = useState({}); // { categoryName: { amount: '' } }
+  const [selectedCategories, setSelectedCategories] = useState({}); // { categoryName: { amount: '', weekdayAmount: '', weekendAmount: '', useSeparateBudgets: false } }
   const [initialBudgetCategories, setInitialBudgetCategories] = useState(new Set()); // Track which categories had budgets when modal opened
   const [showNewCategoryInput, setShowNewCategoryInput] = useState(false);
   const [newCategoryName, setNewCategoryName] = useState('');
@@ -127,16 +127,53 @@ export default function HomeScreen({ navigation }) {
 
     // Get all selected categories with valid amounts
     const budgetsToSave = Object.entries(selectedCategories)
-      .filter(([category, data]) => data.amount && parseFloat(data.amount) > 0)
-      .map(([category, data]) => ({
-        category: category.trim(),
-        amount: parseFloat(data.amount),
-        period: 'monthly', // Always monthly
-      }));
+      .filter(([category, data]) => {
+        if (data.useSeparateBudgets) {
+          return (data.weekdayAmount && parseFloat(data.weekdayAmount) > 0) || 
+                 (data.weekendAmount && parseFloat(data.weekendAmount) > 0);
+        }
+        return data.amount && parseFloat(data.amount) > 0;
+      })
+      .map(([category, data]) => {
+        const budgetData = {
+          category: category.trim(),
+          period: 'monthly', // Always monthly
+        };
+        
+        if (data.useSeparateBudgets) {
+          // For separate budgets, send the daily amounts
+          // The backend will calculate the monthly total based on actual weekday/weekend days in the month
+          const weekdayAmount = data.weekdayAmount ? parseFloat(data.weekdayAmount) : 0;
+          const weekendAmount = data.weekendAmount ? parseFloat(data.weekendAmount) : 0;
+          
+          // Calculate approximate monthly total (backend will recalculate with actual days)
+          // Average month has ~22 weekdays and ~8-9 weekend days
+          const weekdayDaysPerMonth = 22;
+          const weekendDaysPerMonth = 8;
+          const totalMonthly = (weekdayAmount * weekdayDaysPerMonth) + (weekendAmount * weekendDaysPerMonth);
+          
+          budgetData.amount = totalMonthly;
+          budgetData.weekdayAmount = weekdayAmount;
+          budgetData.weekendAmount = weekendAmount;
+        } else {
+          budgetData.amount = parseFloat(data.amount);
+        }
+        
+        return budgetData;
+      });
 
     // Find categories that had budgets initially but are no longer selected
     const categoriesToDelete = Array.from(initialBudgetCategories).filter(
-      category => !selectedCategories[category] || !selectedCategories[category].amount || parseFloat(selectedCategories[category].amount) <= 0
+      category => {
+        if (!selectedCategories[category]) return true;
+        const data = selectedCategories[category];
+        if (data.useSeparateBudgets) {
+          const weekday = data.weekdayAmount ? parseFloat(data.weekdayAmount) : 0;
+          const weekend = data.weekendAmount ? parseFloat(data.weekendAmount) : 0;
+          return weekday <= 0 && weekend <= 0;
+        }
+        return !data.amount || parseFloat(data.amount) <= 0;
+      }
     );
 
     // If no budgets to save and no budgets to delete, show error
@@ -187,17 +224,92 @@ export default function HomeScreen({ navigation }) {
       // Check - add to selection with default values
       setSelectedCategories({
         ...selectedCategories,
-        [categoryName]: { amount: '' }
+        [categoryName]: { 
+          amount: '',
+          weekdayAmount: '',
+          weekendAmount: '',
+          useSeparateBudgets: false
+        }
       });
     }
   };
 
   const handleCategoryAmountChange = (categoryName, amount) => {
+    handleMonthlyAmountChange(categoryName, amount);
+  };
+
+  const handleWeekdayAmountChange = (categoryName, amount) => {
     setSelectedCategories({
       ...selectedCategories,
       [categoryName]: {
         ...selectedCategories[categoryName],
-        amount: amount
+        weekdayAmount: amount
+      }
+    });
+  };
+
+  const handleWeekendAmountChange = (categoryName, amount) => {
+    setSelectedCategories({
+      ...selectedCategories,
+      [categoryName]: {
+        ...selectedCategories[categoryName],
+        weekendAmount: amount
+      }
+    });
+  };
+
+  const handleToggleSeparateBudgets = (categoryName) => {
+    const currentData = selectedCategories[categoryName];
+    const newUseSeparate = !currentData.useSeparateBudgets;
+    
+    let weekdayAmount = currentData.weekdayAmount || '';
+    let weekendAmount = currentData.weekendAmount || '';
+    
+    // If turning on separate budgets and monthly amount exists, auto-split 50/50
+    if (newUseSeparate && currentData.amount) {
+      const monthlyAmount = parseFloat(currentData.amount);
+      if (!isNaN(monthlyAmount) && monthlyAmount > 0) {
+        // Split monthly budget 50/50: $1500 -> $750 for weekdays, $750 for weekends
+        // Then calculate daily amounts: $750 / 22 weekdays, $750 / 8 weekends
+        const halfMonthly = monthlyAmount / 2;
+        weekdayAmount = (halfMonthly / 22).toFixed(2);
+        weekendAmount = (halfMonthly / 8).toFixed(2);
+      }
+    }
+    
+    setSelectedCategories({
+      ...selectedCategories,
+      [categoryName]: {
+        ...selectedCategories[categoryName],
+        useSeparateBudgets: newUseSeparate,
+        weekdayAmount: weekdayAmount,
+        weekendAmount: weekendAmount,
+      }
+    });
+  };
+
+  const handleMonthlyAmountChange = (categoryName, amount) => {
+    const currentData = selectedCategories[categoryName];
+    
+    // Auto-update weekday/weekend if separate budgets is enabled
+    let weekdayAmount = currentData.weekdayAmount || '';
+    let weekendAmount = currentData.weekendAmount || '';
+    
+    if (currentData.useSeparateBudgets && amount && !isNaN(parseFloat(amount)) && parseFloat(amount) > 0) {
+      const monthlyAmount = parseFloat(amount);
+      // Split 50/50: $1500 -> $750 each, then divide by days
+      const halfMonthly = monthlyAmount / 2;
+      weekdayAmount = (halfMonthly / 22).toFixed(2);
+      weekendAmount = (halfMonthly / 8).toFixed(2);
+    }
+    
+    setSelectedCategories({
+      ...selectedCategories,
+      [categoryName]: {
+        ...selectedCategories[categoryName],
+        amount: amount,
+        weekdayAmount: weekdayAmount,
+        weekendAmount: weekendAmount,
       }
     });
   };
@@ -261,8 +373,12 @@ export default function HomeScreen({ navigation }) {
       setEditingBudget(budget);
       const allBudgetsMap = {};
       budgets.forEach(b => {
+        const hasSeparate = b.weekdayAmount !== null && b.weekendAmount !== null;
         allBudgetsMap[b.category] = {
-          amount: b.amount.toString()
+          amount: b.amount.toString(),
+          weekdayAmount: b.weekdayAmount ? b.weekdayAmount.toString() : '',
+          weekendAmount: b.weekendAmount ? b.weekendAmount.toString() : '',
+          useSeparateBudgets: hasSeparate
         };
       });
       setSelectedCategories(allBudgetsMap);
@@ -272,8 +388,12 @@ export default function HomeScreen({ navigation }) {
       setEditingBudget(null);
       const existingBudgetsMap = {};
       budgets.forEach(b => {
+        const hasSeparate = b.weekdayAmount !== null && b.weekendAmount !== null;
         existingBudgetsMap[b.category] = {
-          amount: b.amount.toString()
+          amount: b.amount.toString(),
+          weekdayAmount: b.weekdayAmount ? b.weekdayAmount.toString() : '',
+          weekendAmount: b.weekendAmount ? b.weekendAmount.toString() : '',
+          useSeparateBudgets: hasSeparate
         };
       });
       setSelectedCategories(existingBudgetsMap);
@@ -308,47 +428,57 @@ export default function HomeScreen({ navigation }) {
           {/* Category Budget Progress inside Hero Section */}
           {categoryBudgets.length > 0 && (
             <View style={styles.budgetsProgressCardInHero}>
-              {categoryBudgets.map((catBudget, index) => {
-                const category = categories.find(cat => cat.name === catBudget.category);
-                const categoryIcon = category?.icon || '💰';
-                const progressPercentage = Math.min(100, catBudget.percentageUsed);
-                const isOverBudget = catBudget.spent > catBudget.budget;
-                const isLast = index === categoryBudgets.length - 1;
-                
-                return (
-                  <View key={index} style={[styles.progressItemInHero, isLast && styles.progressItemLast]}>
-                    <View style={styles.progressHeader}>
-                      <View style={styles.progressCategoryInfo}>
-                        <Text style={styles.progressCategoryIcon}>{categoryIcon}</Text>
-                        <View style={styles.progressCategoryText}>
-                          <Text style={styles.progressCategoryNameInHero}>{catBudget.category}</Text>
+            {categoryBudgets.map((catBudget, index) => {
+              const category = categories.find(cat => cat.name === catBudget.category);
+              const categoryIcon = category?.icon || '💰';
+              const progressPercentage = Math.min(100, catBudget.percentageUsed);
+              const isOverBudget = catBudget.spent > catBudget.budget;
+              const isLast = index === categoryBudgets.length - 1;
+              const dayTypeLabel = catBudget.isTodayWeekend ? 'Weekend' : 'Weekday';
+              
+              return (
+                <View key={index} style={[styles.progressItemInHero, isLast && styles.progressItemLast]}>
+                  <View style={styles.progressHeader}>
+                    <View style={styles.progressCategoryInfo}>
+                      <Text style={styles.progressCategoryIcon}>{categoryIcon}</Text>
+                      <View style={styles.progressCategoryText}>
+                        <Text style={styles.progressCategoryNameInHero}>{catBudget.category}</Text>
+                        {catBudget.hasSeparateBudgets ? (
+                          <Text style={styles.progressCategoryAmountInHero}>
+                            {catBudget.isTodayWeekend 
+                              ? `Weekend: $${catBudget.weekendSpent.toFixed(2)} / $${(catBudget.weekendBudget * 8).toFixed(2)}`
+                              : `Weekday: $${catBudget.weekdaySpent.toFixed(2)} / $${(catBudget.weekdayBudget * 22).toFixed(2)}`
+                            }
+                          </Text>
+                        ) : (
                           <Text style={styles.progressCategoryAmountInHero}>
                             ${catBudget.spent.toFixed(2)} / ${catBudget.budget.toFixed(2)}
                           </Text>
-                        </View>
+                        )}
                       </View>
-                      <Text style={[
-                        styles.progressSafeToSpendInHero,
-                        isOverBudget && styles.progressSafeToSpendOverInHero
-                      ]}>
-                        ${catBudget.safeToSpendToday.toFixed(2)}/day
-                      </Text>
                     </View>
-                    <View style={styles.progressBarContainerInHero}>
-                      <View 
-                        style={[
-                          styles.progressBarInHero,
-                          { width: `${progressPercentage}%` },
-                          isOverBudget ? styles.progressBarOverInHero : styles.progressBarNormalInHero
-                        ]} 
-                      />
-                    </View>
-                    <Text style={styles.progressPercentageInHero}>
-                      {progressPercentage.toFixed(1)}% used
+                    <Text style={[
+                      styles.progressSafeToSpendInHero,
+                      isOverBudget && styles.progressSafeToSpendOverInHero
+                    ]}>
+                      ${catBudget.safeToSpendToday.toFixed(2)}/{dayTypeLabel.toLowerCase()}
                     </Text>
                   </View>
-                );
-              })}
+                  <View style={styles.progressBarContainerInHero}>
+                    <View 
+                      style={[
+                        styles.progressBarInHero,
+                        { width: `${progressPercentage}%` },
+                        isOverBudget ? styles.progressBarOverInHero : styles.progressBarNormalInHero
+                      ]} 
+                    />
+                  </View>
+                  <Text style={styles.progressPercentageInHero}>
+                    {progressPercentage.toFixed(1)}% used
+                  </Text>
+                </View>
+              );
+            })}
             </View>
           )}
         </LinearGradient>
@@ -483,6 +613,7 @@ export default function HomeScreen({ navigation }) {
             {budgets.map((budget) => {
               const category = categories.find(cat => cat.name === budget.category);
               const categoryIcon = category?.icon || '💰';
+              const hasSeparateBudgets = budget.weekdayAmount !== null && budget.weekendAmount !== null;
               
               return (
                 <View key={budget._id} style={styles.budgetItem}>
@@ -491,9 +622,25 @@ export default function HomeScreen({ navigation }) {
                       <Text style={styles.budgetCategoryIcon}>{categoryIcon}</Text>
                       <Text style={styles.budgetCategory}>{budget.category}</Text>
                     </View>
-                    <Text style={styles.budgetAmount}>
-                      ${budget.amount.toFixed(2)} / month
-                    </Text>
+                    {hasSeparateBudgets ? (
+                      <View style={styles.budgetAmountContainer}>
+                        <Text style={styles.budgetAmount}>
+                          ${budget.amount.toFixed(2)} / month
+                        </Text>
+                        <View style={styles.budgetBreakdown}>
+                          <Text style={styles.budgetBreakdownText}>
+                            Weekday: ${budget.weekdayAmount.toFixed(2)}/day
+                          </Text>
+                          <Text style={styles.budgetBreakdownText}>
+                            Weekend: ${budget.weekendAmount.toFixed(2)}/day
+                          </Text>
+                        </View>
+                      </View>
+                    ) : (
+                      <Text style={styles.budgetAmount}>
+                        ${budget.amount.toFixed(2)} / month
+                      </Text>
+                    )}
                   </View>
                   <View style={styles.budgetActions}>
                     <TouchableOpacity
@@ -585,11 +732,55 @@ export default function HomeScreen({ navigation }) {
                               <TextInput
                                 style={styles.amountInputField}
                                 value={categoryData.amount}
-                                onChangeText={(text) => handleCategoryAmountChange(cat.name, text)}
+                                onChangeText={(text) => handleMonthlyAmountChange(cat.name, text)}
                                 placeholder="0.00"
                                 keyboardType="decimal-pad"
                               />
                             </View>
+
+                            <TouchableOpacity
+                              style={styles.separateBudgetToggle}
+                              onPress={() => handleToggleSeparateBudgets(cat.name)}
+                            >
+                              <View style={styles.toggleRow}>
+                                <Text style={styles.toggleLabel}>Separate Weekday/Weekend Budgets</Text>
+                                <View style={[
+                                  styles.toggleSwitch,
+                                  categoryData.useSeparateBudgets && styles.toggleSwitchActive
+                                ]}>
+                                  {categoryData.useSeparateBudgets && (
+                                    <View style={styles.toggleSwitchThumb} />
+                                  )}
+                                </View>
+                              </View>
+                            </TouchableOpacity>
+
+                            {categoryData.useSeparateBudgets && (
+                              <>
+                                <Text style={styles.budgetLabel}>Weekday Daily Budget</Text>
+                                <View style={styles.amountInputContainer}>
+                                  <Text style={styles.currencySymbol}>$</Text>
+                                  <TextInput
+                                    style={styles.amountInputField}
+                                    value={categoryData.weekdayAmount || ''}
+                                    onChangeText={(text) => handleWeekdayAmountChange(cat.name, text)}
+                                    placeholder="0.00"
+                                    keyboardType="decimal-pad"
+                                  />
+                                </View>
+                                <Text style={styles.budgetLabel}>Weekend Daily Budget</Text>
+                                <View style={styles.amountInputContainer}>
+                                  <Text style={styles.currencySymbol}>$</Text>
+                                  <TextInput
+                                    style={styles.amountInputField}
+                                    value={categoryData.weekendAmount || ''}
+                                    onChangeText={(text) => handleWeekendAmountChange(cat.name, text)}
+                                    placeholder="0.00"
+                                    keyboardType="decimal-pad"
+                                  />
+                                </View>
+                              </>
+                            )}
                           </View>
                         )}
                       </View>
@@ -1040,6 +1231,19 @@ const styles = StyleSheet.create({
   budgetAmount: {
     fontSize: 13,
     color: '#6b7280',
+    marginTop: 4,
+  },
+  budgetAmountContainer: {
+    marginTop: 4,
+  },
+  budgetBreakdown: {
+    marginTop: 6,
+    gap: 2,
+  },
+  budgetBreakdownText: {
+    fontSize: 12,
+    color: '#9ca3af',
+    marginTop: 2,
   },
   budgetActions: {
     flexDirection: 'row',
@@ -1148,6 +1352,38 @@ const styles = StyleSheet.create({
     paddingTop: 12,
     borderTopWidth: 1,
     borderTopColor: '#e5e7eb',
+  },
+  separateBudgetToggle: {
+    marginBottom: 16,
+  },
+  toggleRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  toggleLabel: {
+    fontSize: 14,
+    fontWeight: '500',
+    color: '#374151',
+    flex: 1,
+  },
+  toggleSwitch: {
+    width: 48,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#d1d5db',
+    justifyContent: 'center',
+    paddingHorizontal: 2,
+  },
+  toggleSwitchActive: {
+    backgroundColor: '#6366f1',
+  },
+  toggleSwitchThumb: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: '#fff',
+    alignSelf: 'flex-end',
   },
   budgetLabel: {
     fontSize: 14,
